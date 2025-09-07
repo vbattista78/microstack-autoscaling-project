@@ -35,7 +35,7 @@ Reason:
 Check that services are running and that the Cirros image and external network are available.
 ```
 
-### 2. Internal Networking
+### 2. Internal Networking and Rputer
 ``` bash
 microstack.openstack network create lab-net
 microstack.openstack subnet create \
@@ -45,6 +45,7 @@ microstack.openstack subnet create \
   --dns-nameserver 8.8.8.8 \
   --dns-nameserver 1.1.1.1 \
   lab-net-subnet
+
 microstack.openstack router create lab-router
 microstack.openstack router set lab-router --external-gateway external
 microstack.openstack router add subnet lab-router lab-net-subnet
@@ -59,6 +60,7 @@ microstack.openstack security group create sg-secure
 microstack.openstack security group rule create \
   --ingress --ethertype IPv4 --protocol tcp --dst-port 22 \
   --remote-ip <IP_HOST>/32 sg-secure
+
 microstack.openstack security group rule create \
   --ingress --ethertype IPv4 --protocol icmp \
   --remote-ip 192.168.100.0/24 sg-secure
@@ -70,14 +72,17 @@ Enable ICMP (ping) within the network for diagnostics.
 
 ### 4. Keypair
 ``` bash
-ssh-keygen -t ed25519 -f ~/.ssh/lab-key -N ""
+test -f ~/.ssh/lab-key || ssh-keygen -t ed25519 -f ~/.ssh/lab-key -N ""
+microstack.openstack keypair show lab-key >/dev/null 2>&1 || \
 microstack.openstack keypair create --public-key ~/.ssh/lab-key.pub lab-key
+
+test -f ~/.ssh/lab-key-rsa || ssh-keygen -t rsa -b 2048 -f ~/.ssh/lab-key-rsa -N ""
 
 Reason:
 Create a key pair for secure password-free access.
 ```
 
-### 5. Creating a VM
+### 5. Creating a VM CirrOS
 ``` bash
 microstack.openstack server create test-vm \
   --flavor m1.tiny \
