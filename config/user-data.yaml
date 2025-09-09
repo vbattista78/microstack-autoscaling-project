@@ -1,7 +1,12 @@
 #cloud-config
-package_update: true
-packages:
-  - htop
-  - stress
+final_message: "VM ready"
+
+write_files:
+  - path: /home/cirros/VM_READY.txt
+    permissions: '0644'
+    content: |
+      VM ready
+      This file was created by cloud-init user-data.
+
 runcmd:
-  - [ bash, -lc, "echo VM ready > /etc/motd" ]
+  - [ sh, -c, 'echo "userdata OK at $(date)" > /home/cirros/user-data.ok' ]
