@@ -1,214 +1,66 @@
 # MicroStack Autoscaling with Load Balancing: CPU Metrics to Scale Actions (Create on High, Delete on Low)
 
-This project demonstrates a practical, reproducible **autoscaling with load balancing** pattern in a single-node **MicroStack (OpenStack)** lab environment.
+This project implements a practical **autoscaling with load balancing** pattern on a single-node **MicroStack (OpenStack)** lab. A controller monitors a baseline VM’s CPU/memory; on sustained high load it **creates a clone**, and on sustained low load it **deletes the baseline** and keeps the **clone as the new primary**. The goal is a small, reproducible lab that demonstrates scale-out and graceful handover.
 
-The project provisions the underlying networking, deploys a baseline VM (`vm-test`), continuously monitors CPU utilization, and—when a configurable high threshold (default **60%**) is crossed—automatically instantiates a second VM (`vm-test-clone`) and **balances the workload between the two** while both are active. When utilization falls below a configurable low threshold (default **20%**), the system performs a **graceful handover** by removing the baseline VM and keeping the clone running as the new primary, ensuring continuity without downtime.
-
-The workflow is implemented with idempotent Bash scripts and a lightweight Python controller, uses cloud-init for first-boot configuration, and is documented with screenshots in `docs/` for straightforward replication and evaluation.
+**Scripts in this repo**
+- `deploy_secure_vm.py` — Idempotent provisioning: network/router/security group/keypair, baseline **CirrOS** VM, **Floating IP**, optional **snapshot retention**, and **cleanup**. It also sets minimal security-group rules so SSH and ICMP work out of the box.
+- `autoscale_watch.py` — Autoscaling controller: polls **CPU and MEM** via SSH, triggers **clone creation** and **baseline removal**; expects to call the deploy tool as `~/deploy_secure_vm.py`.
+- `split_after_scale.sh` — Load generator: produces a deterministic **100% CPU spike** on the baseline to force scale-out and later a **~50/50 split** across base+clone; includes a `--stop` to cleanly stop all loads.
 
 ---
 
 ## Quick Start (3 steps)
 
 ```bash
-# 0) One-time: ensure MicroStack is installed and credentials are loaded
+# 0) Load OpenStack CLI credentials (MicroStack)
 source /var/snap/microstack/common/etc/microstack.rc
 
-# 1) Provision baseline (network + baseline VM)
-bash scripts/setup_networking.sh
-bash scripts/create_vm_test.sh
+# 1) Create a baseline VM (CirrOS + Floating IP) with minimal SG and (optionally) no snapshot
+python3 ./deploy_secure_vm.py --name VM-test --no-snapshot \
+  --keypair lab-key --pubkey-file ~/.ssh/lab-key.pub
 
-# 2) Start the autoscaling controller (keeps running)
-python3 autoscale_watch.py \
-  --clone vm-test-clone \
-  --high 60 \
-  --low 20 \
-  --min-up 4 \
-  --min-down 4 \
+# Note the actual name (auto-numbered, e.g., VM-test_1):
+microstack.openstack server list
+
+# 2) Start the autoscaling controller (monitor CPU/MEM on the baseline)
+python3 ./autoscale_watch.py \
+  --server VM-test_1 \
+  --clone legacy \
+  --high 60 --low 20 \
+  --min-up 4 --min-down 4 \
   --metric max
 
-# 3) In another terminal: generate CPU load to trigger scale-out
+# 3) In another terminal, trigger load and watch the scale-out + handover
 ./split_after_scale.sh
 ```
 
 **What you’ll see**
-- When CPU rises above **60%** for `--min-up` samples → controller **creates `vm-test-clone`** and **balances load**.
-- When CPU drops below **20%** for `--min-down` samples → controller **deletes the baseline** and **keeps the clone** as the new primary.
+- On sustained **HIGH** (≥ `--high` for `--min-up` samples), the controller **creates a clone** named from `<base>_clone` (automatically numbered by the deploy tool).
+- On sustained **LOW** (≤ `--low` for `--min-down` samples), the controller **deletes the baseline** and continues monitoring the **clone** (handover).
+
+**Why each command matters**
+- `source …microstack.rc` → loads OpenStack auth variables into your shell (auth URL, project, token). Without this, OpenStack CLI calls will fail.
+- `deploy_secure_vm.py …` → creates everything needed (network, SG, keypair) and a **CirrOS** VM with a Floating IP. `--no-snapshot` skips the automatic snapshot (faster for tests).
+- `server list` → shows the **actual VM name** created (e.g., `VM-test_1`), which you’ll pass to `--server`.
+- `autoscale_watch.py …` → starts the **controller** that measures CPU/MEM via SSH and applies **scale-out / handover** logic.
+- `split_after_scale.sh` → generates load (first 100% to trigger scale-out, then ~50/50 on base+clone to demonstrate load balancing).
 
 ---
 
-## Project Setup
+## One-time setup (keys, SDK, path)
 
-### 1. MicroStack
-
-#### 1.1 Installation
+1) **SSH keys** (keep both; CirrOS often prefers RSA):
 ```bash
-sudo snap install microstack --devmode --beta
-sudo microstack init --auto --control
+ssh-keygen -t ed25519 -f ~/.ssh/lab-key -N ""
+ssh-keygen -t rsa -b 2048 -f ~/.ssh/lab-key-rsa -N ""
 ```
-*Explanation:*  
-- `snap install` deploys MicroStack in developer mode; this is convenient in lab scenarios (fewer confinement restrictions).  
-- `microstack init --auto --control` configures the core OpenStack services (**Keystone**, **Glance**, **Nova**, **Neutron**) in an all-in-one controller node, applying sensible defaults so you can start issuing OpenStack commands immediately.
+*Explanation:* ed25519 is modern/compact; RSA ensures compatibility with CirrOS. Keys enable passwordless SSH.
 
-#### 1.2 Configure Credentials
+2) **OpenStack SDK** & **clouds.yaml** (the scripts use `cloud='microstack'`):
 ```bash
-source /var/snap/microstack/common/etc/microstack.rc
-```
-*Explanation:*  
-- Loads OpenStack environment variables (e.g., `OS_AUTH_URL`, `OS_USERNAME`, `OS_PASSWORD`, `OS_PROJECT_NAME`).  
-- Without this step, CLI calls like `microstack.openstack server list` will fail with missing auth parameters.
-
-#### 1.3 Verify Installation
-```bash
-microstack.openstack status
-microstack.openstack service list
-microstack.openstack image list
-microstack.openstack network list
-```
-*Explanation:*  
-- `status` checks the overall health of MicroStack services.  
-- `service list` confirms API endpoints/registrations.  
-- `image list` ensures base images (e.g., CirrOS) are present.  
-- `network list` verifies that the default **external** provider network exists (needed for floating IPs).
-
----
-
-### 2. Internal Networking and Router
-```bash
-microstack.openstack network create lab-net
-microstack.openstack subnet create \
-  --network lab-net \
-  --subnet-range 192.168.100.0/24 \
-  --gateway 192.168.100.1 \
-  --dns-nameserver 8.8.8.8 \
-  --dns-nameserver 1.1.1.1 \
-  lab-net-subnet
-
-microstack.openstack router create lab-router
-microstack.openstack router set lab-router --external-gateway external
-microstack.openstack router add subnet lab-router lab-net-subnet
-```
-*Explanation:*  
-- Creates an internal tenant network (`lab-net`) and its subnet.  
-- Attaches `lab-router` to the provider **external** network to enable North-South connectivity.  
-- Adds the internal subnet to the router so instances on `lab-net` can reach the Internet via **SNAT** performed by Neutron.
-
----
-
-### 3. Security Group
-```bash
-microstack.openstack security group create sg-secure
-
-microstack.openstack security group rule create \
-  --ingress --ethertype IPv4 --protocol tcp --dst-port 22 \
-  --remote-ip <HOST_IP>/32 \
-  sg-secure
-
-microstack.openstack security group rule create \
-  --ingress --ethertype IPv4 --protocol icmp \
-  --remote-ip 192.168.100.0/24 \
-  sg-secure
-```
-*Explanation:*  
-- Defines a least-privilege security group for the lab.  
-- Allows **SSH** only from your host (`<HOST_IP>/32`) to reduce the attack surface.  
-- Enables **ICMP** (ping) within the internal subnet for basic diagnostics (latency, reachability).
-
----
-
-### 4. Key Pair
-```bash
-test -f ~/.ssh/lab-key || ssh-keygen -t ed25519 -f ~/.ssh/lab-key -N ""
-microstack.openstack keypair show lab-key >/dev/null 2>&1 || \
-  microstack.openstack keypair create --public-key ~/.ssh/lab-key.pub lab-key
-
-# (Optional) Also create an RSA key if needed:
-test -f ~/.ssh/lab-key-rsa || ssh-keygen -t rsa -b 2048 -f ~/.ssh/lab-key-rsa -N ""
-```
-*Explanation:*  
-- Generates an **ed25519** SSH key (modern, short, secure) if missing and registers the **public** key in Nova (`keypair create`).  
-- Instances launched with `--key-name lab-key` will inject this public key, enabling **passwordless** admin access.
-
----
-
-### 5. Create a CirrOS VM
-```bash
-microstack.openstack server create test-vm \
-  --flavor m1.tiny \
-  --image cirros \
-  --nic net-id=<LAB_NET_ID> \
-  --key-name lab-key \
-  --security-group sg-secure
-```
-*Explanation:*  
-- Boots a minimal VM using the CirrOS image to validate networking and access quickly.  
-- Uses the internal network (`<LAB_NET_ID>`) and the hardened `sg-secure`.  
-- Retrieve `<LAB_NET_ID>` with:  
-  `microstack.openstack network show lab-net -f value -c id`.
-
----
-
-### 6. Floating IP
-```bash
-microstack.openstack floating ip create external
-microstack.openstack server add floating ip test-vm <FIP>
-```
-*Explanation:*  
-- Allocates a **Floating IP** from the provider `external` network and associates it to `test-vm`.  
-- This provides **public reachability** (from your host/LAN) without exposing the entire tenant network.
-
----
-
-### 7. Enable NAT on the Host
-```bash
-echo 1 | sudo tee /proc/sys/net/ipv4/ip_forward
-sudo sed -i 's/^#\?net.ipv4.ip_forward=.*/net.ipv4.ip_forward=1/' /etc/sysctl.conf
-sudo sysctl -p
-
-# Adjust interface names as appropriate for your host:
-sudo iptables -t nat -A POSTROUTING -s 10.20.20.0/24 -o ens33 -j MASQUERADE
-sudo iptables -A FORWARD -i ens33 -o br-ex -m state --state RELATED,ESTABLISHED -j ACCEPT
-sudo iptables -A FORWARD -i br-ex -o ens33 -j ACCEPT
-
-sudo apt install -y iptables-persistent
-sudo netfilter-persistent save
-```
-*Explanation:*  
-- Enables **kernel IP forwarding** and sets **MASQUERADE** so traffic from internal ranges can egress via the host NIC (`ens33` in the example).  
-- The FORWARD rules permit return traffic and allow forwarding between the external NIC and Open vSwitch bridge (`br-ex`).  
-- `iptables-persistent` saves rules across reboots.  
-> **Note:** Replace `ens33`, `br-ex`, and `10.20.20.0/24` with your actual interface names and subnet.
-
----
-
-### 8. Test from Inside the CirrOS VM
-```bash
-ping -c 3 1.1.1.1
-ping -c 3 8.8.8.8
-ping -c 3 google.com
-```
-*Explanation:*  
-- Validates **basic IP connectivity** (to 1.1.1.1 / 8.8.8.8) and **DNS resolution** (to `google.com`).  
-- If first two succeed but DNS fails, check `/etc/resolv.conf` in the guest and DNS settings on the subnet.
-
----
-
-### 9. Python Automation
-
-#### 9.1 Environment Setup
-```bash
-python3 -m venv ~/venv-openstack
-source ~/venv-openstack/bin/activate
-pip install --upgrade pip
-pip install openstacksdk
-```
-*Explanation:*  
-- Creates an **isolated Python virtual environment** for OpenStack automation, avoiding system-wide package conflicts.  
-- Installs `openstacksdk`, the canonical library for programmatic access to OpenStack APIs.
-
-#### 9.2 `clouds.yaml`
-```yaml
-# Save as: ~/.config/openstack/clouds.yaml
+python3 -m pip install --user openstacksdk
+mkdir -p ~/.config/openstack
+cat > ~/.config/openstack/clouds.yaml <<'YAML'
 clouds:
   microstack:
     auth:
@@ -222,69 +74,106 @@ clouds:
     interface: public
     identity_api_version: 3
     verify: false
+YAML
 ```
-*Explanation:*  
-- Centralizes **auth settings** so your Python code (and CLI with `--os-cloud microstack`) can authenticate without exporting environment variables every time.  
-- `verify: false` disables TLS verification (handy with MicroStack’s default self-signed cert in lab contexts).
+*Explanation:* centralizes credentials for SDK/CLI; `verify: false` avoids self-signed certificate issues in the lab. Replace `<MICROSTACK_IP>` and `<KEYSTONE_PASSWORD>`.
 
----
-
-### 10. `deploy_secure_vm.py` — Functional Overview & Demo Flow
-
-**What the command does (core features):**
-- **Pre-flight checks**: verifies that the **network**, **subnet**, **router**, **security group**, and **key pair** exist; creates them if missing (idempotent behavior).  
-- **Baseline VM provisioning**: deploys the primary instance (e.g., `vm-test`) with the selected image/flavor, attaches it to `lab-net`, and injects the SSH key.  
-- **Connectivity enablement**: optionally allocates and associates a **Floating IP** for external reachability.  
-- **Snapshot lifecycle (optional)**: creates snapshots with **configurable retention**, to preserve a known-good state.  
-- **Cleanup mode**: via `--cleanup`, removes instances, orphaned Floating IPs, and obsolete snapshots to restore a clean lab.
-
-**How it fits the autoscaling demo (end-to-end):**
-- The script **creates the baseline VM** (step 1 of the demo).  
-- Then, when the **autoscaling controller** (see §11) detects **high CPU** and triggers scaling, a **clone instance** (e.g., `vm-test-clone`) is created and **load balancing** is enacted while both are active (step 2).  
-- When CPU drops below the **low threshold**, the system performs a **handover** by **deleting the baseline VM** and keeping the clone as the new primary (step 3).  
-  > In practice: `deploy_secure_vm.py` provisions the environment and baseline; the **controller** executes the scale actions. Together they realize the full “create VM → create clone → delete base” flow.
-
-*Explanation:*  
-- Keeping provisioning and scaling **separate** makes the system easier to reason about and test.  
-- The demo mirrors production patterns: infrastructure-as-code for **setup**, a controller/agent for **reactive scaling**.
-
----
-
-### 11. Autoscaling Controller — `autoscale_watch.py`
-Run the controller with the thresholds and parameters for your lab:
-
+3) **Make the deployer reachable from `$HOME`**  
+The controller invokes it as `~/deploy_secure_vm.py`:
 ```bash
-python3 autoscale_watch.py \
-  --clone vm-test-clone \
-  --high 60 \
-  --low 20 \
-  --min-up 4 \
-  --min-down 4 \
-  --metric max
+cp ./deploy_secure_vm.py ~/deploy_secure_vm.py
+chmod +x ~/deploy_secure_vm.py
 ```
-*Explanation:*  
-- `--clone vm-test-clone`: name of the **clone** to be created when scaling out.  
-- `--high 60`: **upper CPU threshold** (%). Crossing it triggers **scale-out** (create the clone).  
-- `--low 20`: **lower CPU threshold** (%). Crossing it triggers **handover** (delete the baseline, keep the clone).  
-- `--min-up 4`: require **4 consecutive samples** above `--high` before scaling out (debounces spikes).  
-- `--min-down 4`: require **4 consecutive samples** below `--low` before deleting the base (prevents flapping).  
-- `--metric max`: use the **maximum** CPU value among collected samples per interval (more conservative).  
-> Ensure your metric backend is reachable (Ceilometer/Gnocchi/SDK/SSH sampling, depending on your implementation).  
-> Use names consistent with your environment (defaults in this README use `vm-test` / `vm-test-clone`).
+*Security-group note:* by default, the deployer opens **ICMP** to `0.0.0.0/0` and **SSH 22** only from `10.20.20.1/32`. Change that CIDR to your **host IP/32** (or temporarily open to `0.0.0.0/0` while testing) so SSH works immediately.
 
 ---
 
-### 12. Load Generation — `split_after_scale.sh`
-Trigger CPU pressure to drive the autoscaling event:
+## How it works — detailed command explanations
 
+### 1) Baseline provisioning — `deploy_secure_vm.py`
+
+**What it does & why**
+1. **Networking (idempotent):** creates/validates `lab-net`, `lab-net-subnet (192.168.100.0/24)`, and `lab-router` with **external** gateway, then attaches the subnet to the router → instances can reach the Internet.
+2. **Security Group `sg-secure`:** enables **ICMP** (diagnostics) and **SSH 22** from your IP → safe admin access without opening to the entire Internet.
+3. **Nova keypair:** if missing, imports your public key (`--pubkey-file`) under name `--keypair` → **passwordless SSH**.
+4. **CirrOS `m1.tiny` VM:** creates a baseline named **`<BASE>_N`** (e.g., `VM-test_1`) to avoid name collisions across repeated runs.
+5. **Floating IP:** allocates and associates a FIP with the VM → reachable from your host/LAN.
+6. **Optional snapshots:** unless you pass `--no-snapshot`, creates a snapshot and **retains only the last `--retain`** (production-like hygiene in a lab).
+7. **Cleanup:** with `--cleanup <BASE>` removes all VMs starting with `<BASE>`, orphan Floating IPs, and (optionally) related snapshots.
+
+**Examples**
 ```bash
+# Create/update a baseline VM (no snapshot)
+python3 ./deploy_secure_vm.py --name VM-test --no-snapshot \
+  --keypair lab-key --pubkey-file ~/.ssh/lab-key.pub
+
+# Full cleanup for a base prefix (VMs/FIPs; add snapshots with --wipe-snaps)
+python3 ./deploy_secure_vm.py --cleanup VM-test --wipe-snaps --yes
+```
+
+> After deploy, the script prints ready-to-use SSH commands (ed25519 and RSA) and reminds the default CirrOS console password (`cubswin:)`).
+
+---
+
+### 2) Autoscaling controller — `autoscale_watch.py`
+
+**What it measures & how it decides**
+- **Metrics:** reads **CPU** (`/proc/stat`) and **MEM** (`/proc/meminfo`) via SSH; choose `--metric cpu`, `--metric mem`, or `--metric max` (default, most conservative).
+- **SSH user/key:** user **`cirros`**, **RSA** key for compatibility; point to it with `--ssh-key-path` if needed.
+- **Scale-out:** when the metric stays ≥ `--high` for `--min-up` consecutive samples → calls the deployer to create a clone using `<base>_clone` as base (the deployer auto-numbers, e.g., `_clone_1`).
+- **Handover:** when the metric stays ≤ `--low` for `--min-down` samples **and a clone exists** → deletes the **baseline** (via the deployer) and switches monitoring to the **clone** (new primary).
+
+**Key parameters (and why)**
+```bash
+python3 ./autoscale_watch.py \
+  --server VM-test_1 \        # VM to monitor (if omitted: interactive selection in a TTY)
+  --clone legacy \            # kept for compatibility; the deployer decides the actual name
+  --high 60 --low 20 \        # thresholds: high to create, low to hand over
+  --min-up 4 --min-down 4 \   # consecutive samples required (anti-flap)
+  --interval 5 \              # polling interval in seconds
+  --metric max \              # cpu | mem | max (use "max" to be conservative)
+  --ssh-key-path ~/.ssh/lab-key-rsa \
+  --deploy-keypair lab-key \
+  --deploy-pubkey-file ~/.ssh/lab-key.pub
+```
+
+**What you’ll see in logs**
+- metric lines: `[metrics] cpu=… mem=… -> max=…`
+- **SCALE UP**: log lines showing scale up and the deployer being invoked
+- **SCALE DOWN**: log lines like “deleting baseline … and proceeding with clone …”
+
+> Why `~/deploy_secure_vm.py`? The controller reuses the deployer’s idempotent logic for both **clone creation** and **baseline deletion**; keeping it in `$HOME` makes the call stable regardless of the current working directory.
+
+---
+
+### 3) Load generator — `split_after_scale.sh`
+
+**What it does & why**
+- If **no clone exists**, it starts **100% CPU** on the baseline (one `yes > /dev/null` per vCPU) until the controller scales; then it waits for the clone to have a FIP/SSH, **stops 100%**, and starts a **~50/50 duty cycle** on **both** baseline and clone to showcase load balancing.
+- If a clone **already exists**, it skips the 100% spike and starts **50/50** directly on base+clone.
+- `--stop`: safely stops the load on base and clone (automatically detects active pairs).
+
+**Usage**
+```bash
+# Start: interactively choose an ACTIVE VM as the baseline
 ./split_after_scale.sh
+
+# Stop: end the load on all detected base/clone pairs
+./split_after_scale.sh --stop
 ```
-*Explanation:*  
-- Generates **high CPU load (≈100%)** on the baseline VM to reliably cross the **high threshold** and **force scale-out**.  
-- Useful for **demos** and **tests**: you can observe the controller logs, the creation of `vm-test-clone`, subsequent **load balancing**, and finally the **deletion of the baseline** once CPU falls and stabilizes below the low threshold.
 
 ---
 
-**Placeholders to replace:**  
-`<HOST_IP>`, `<LAB_NET_ID>`, `<FIP>`, `<MICROSTACK_IP>`, `<KEYSTONE_PASSWORD>`.
+## What to expect (end-to-end)
+
+1. `deploy_secure_vm.py --name VM-test` → **`VM-test_1`** ACTIVE with a Floating IP and correct SG in place.  
+2. `autoscale_watch.py --server VM-test_1` → monitoring starts (CPU/MEM).  
+3. `split_after_scale.sh` → sustained load ≥ 60% → controller **creates `<base>_clone_*`**; when load falls ≤ 20% sustained → controller **deletes the baseline** and continues on the **clone**.
+
+---
+
+## Repository layout
+
+- `deploy_secure_vm.py` — provisioning (network/router/SG/keypair/VM), Floating IP, snapshots, cleanup  
+- `autoscale_watch.py` — autoscaler (CPU/MEM polling, scale-out via deployer, handover)  
+- `split_after_scale.sh` — deterministic load generator (`100%` spike + `~50/50` balancer with `--stop`)
