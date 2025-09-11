@@ -177,3 +177,17 @@ python3 ./autoscale_watch.py \
 - `deploy_secure_vm.py` — provisioning (network/router/SG/keypair/VM), Floating IP, snapshots, cleanup  
 - `autoscale_watch.py` — autoscaler (CPU/MEM polling, scale-out via deployer, handover)  
 - `split_after_scale.sh` — deterministic load generator (`100%` spike + `~50/50` balancer with `--stop`)
+
+## Limitations
+
+- **Single-node MicroStack lab:** no high availability and limited performance; intended for reproducible demos rather than production.
+- **Guest image:** the baseline uses **CirrOS**, which has a minimal userspace and limited cloud-init features (no package manager).
+- **Telemetry path:** metrics are sampled over **SSH** from inside the guest (no Ceilometer/Gnocchi/Monasca).
+- **Load balancing scope:** there is no L4/L7 load balancer; the “balancing” is demonstrated by splitting CPU load across the two instances during the overlap window.
+
+### Note on the (deferred) Horizon dashboard
+
+Initially, the project aimed to provide a small **Horizon panel** under the “Project” section to orchestrate the same workflow from the GUI. On **MicroStack**, however, Horizon is delivered as a **snap**; the snap mount is **read-only**, and enabling a custom panel requires changing Horizon’s Python/Django modules and settings (e.g., `INSTALLED_APPS`, panel registrations, `local_settings.py`). Because these files live inside the read-only snap at runtime, the panel cannot be dropped in or enabled without **rebuilding the Horizon snap** or running a **separate Horizon deployment** (e.g., a source/DevStack build or a containerized Horizon) where those changes are allowed.
+
+For this reason, the files needed to explore a dashboard implementation were **authored but not executed** on MicroStack. If you plan to pursue a GUI path on a different OpenStack build, refer to the **official Horizon Dashboard Developer Guide** for panel/plugin structure and enablement steps.
+
