@@ -191,3 +191,14 @@ Initially, the project aimed to provide a small **Horizon panel** under the “P
 
 For this reason, the files needed to explore a dashboard implementation were **authored but not executed** on MicroStack. If you plan to pursue a GUI path on a different OpenStack build, refer to the **official Horizon Dashboard Developer Guide** for panel/plugin structure and enablement steps.
 
+### Reference documentation used for implementation and configuration:
+- [MicroStack Documentation](https://microstack.run/docs/)
+- [MicroStack Start Reference](https://discourse.ubuntu.com/t/get-started-with-microstack/13998)
+- [Official Ubuntu Cloud images](https://cloud-images.ubuntu.com/)
+- [OpenStack CLI Reference](https://docs.openstack.org/python-openstackclient/latest/)
+
+### Disclaimers
+* This README is both a user guide and a summary report of the project for the period of August 2025.
+* Names and IPs have been anonymized for the creation of the repository!
+* The laboratory was created without the use of certificates to avoid conflicts and problems during development. The use of certificates is recommended in the event of operational use.
+
