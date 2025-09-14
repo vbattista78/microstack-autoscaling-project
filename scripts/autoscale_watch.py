@@ -6,7 +6,6 @@ from openstack import connection
 # Utility di discovery VMs
 # ------------------------
 def _list_active_with_fip(conn):
-    """Return list of tuples (name, fip) for ACTIVE servers; fip may be None."""
     items = []
     for s in conn.compute.servers():
         try:
@@ -21,7 +20,6 @@ def _list_active_with_fip(conn):
             items.append((s.name, fip))
         except Exception:
             pass
-    # sort by name for stable UX
     items.sort(key=lambda t: t[0])
     return items
 
@@ -96,7 +94,6 @@ def _is_clone_of(base_name: str, candidate: str) -> bool:
     return candidate == pref or candidate.startswith(pref + "_")
 
 def _list_clones(conn, base_name: str):
-    """Ritorna la lista di (server_obj, index_int_or_None) per i cloni di base."""
     pref = _clone_prefix(base_name)
     out = []
     pattern = re.compile(rf"^{re.escape(pref)}_(\d+)$")
@@ -112,12 +109,10 @@ def _list_clones(conn, base_name: str):
             out.append((s, idx))
         except Exception:
             pass
-    # ordina per indice (None < 0), poi per nome
     out.sort(key=lambda t: (-1 if t[1] is None else t[1], t[0].name))
     return out
 
 def _pick_primary_clone_name(base_name: str) -> str:
-    """Nome base usato dal deploy per creare il nuovo clone (senza numero)."""
     return _clone_prefix(base_name)
 
 def _get_server_fip(conn, server_obj):
@@ -135,7 +130,7 @@ def main():
     ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--server", required=False, help="Nome della VM da monitorare (se assente, verrà richiesto interattivamente)")
     ap.add_argument("--clone", required=True, help="(Compatibilità) Prefisso/nome clone legacy: mantenuto ma NON usato per il naming")
-    ap.add_argument("--high", type=float, default=60.0, help="Soglia alta per lo scale-up (%)")
+    ap.add_argument("--high", type=float, default=80.0, help="Soglia alta per lo scale-up (%)")  # default 80
     ap.add_argument("--low",  type=float, default=20.0, help="Soglia bassa per lo scale-down (%)")
     ap.add_argument("--min-up", type=int, default=4, help="Campioni consecutivi sopra HIGH per scalare su")
     ap.add_argument("--min-down", type=int, default=4, help="Campioni consecutivi sotto LOW per scalare giù")
@@ -149,16 +144,20 @@ def main():
                     help="Eventuale file di public key da (ri)inserire in OpenStack")
     args = ap.parse_args()
 
+    # Forza minimo effettivo 80% anche se da CLI passi meno (es. --high 60)
+    MIN_HIGH = 80.0
+    if args.high < MIN_HIGH:
+        print(f"[i] --high richiesto {args.high:.1f}% < soglia minima {MIN_HIGH:.1f}%, uso {MIN_HIGH:.1f}%.")
+        args.high = MIN_HIGH
+
     conn = connection.Connection(cloud='microstack')
 
-    # Se --server non è passato: in ambiente interattivo chiedi all'utente; in non-interattivo, errore.
     if not args.server:
         if sys.stdin.isatty() and sys.stdout.isatty():
             args.server = _choose_server_interactive(conn)
         else:
             print("[!] Parametro --server obbligatorio in esecuzione non-interattiva.", file=sys.stderr); sys.exit(2)
 
-    # Stato iniziale: VM base e FIP
     base = conn.compute.find_server(args.server)
     if not base:
         print(f"[!] VM '{args.server}' non trovata", file=sys.stderr); sys.exit(1)
@@ -167,7 +166,7 @@ def main():
         print("[!] Nessun Floating IP associato alla VM monitorata", file=sys.stderr); sys.exit(1)
 
     print("[*] Autoscaler avviato")
-    print(f"[i] Monitor su '{args.server}' @ {fip} — metric={args.metric}, HIGH={args.high}%, LOW={args.low}%")
+    print(f"[i] Monitor su '{args.server}' @ {fip} — metric={args.metric}, HIGH={args.high:.1f}%, LOW={args.low:.1f}%")
 
     hi_hits = lo_hits = 0
 
@@ -185,11 +184,9 @@ def main():
                 else:
                     hi_hits = lo_hits = 0
 
-                # -------- Cloni della VM base corrente --------
                 clones = _list_clones(conn, args.server)
-                # ---------------------------------------------
 
-                # SCALE UP: crea <server>_clone_1 solo se NON esiste già alcun clone
+                # SCALE UP
                 if hi_hits >= args.min_up:
                     if clones:
                         short = [(s.name, getattr(s, "status", "?")) for (s, idx) in clones]
@@ -203,18 +200,13 @@ def main():
                         subprocess.run(" ".join(cmd), shell=True, check=True)
                     hi_hits = 0
 
-                # SCALE DOWN: cancella la BASE SOLO se esiste almeno un clone
+                # SCALE DOWN
                 if lo_hits >= args.min_down:
                     if clones:
-                        # Scegli il "clone principale" (indice più alto se presenti numeri)
-                        chosen_clone, chosen_idx = clones[-1]  # perché la lista è ordinata per indice asc
+                        chosen_clone, chosen_idx = clones[-1]
                         print(f"[+] SCALE DOWN: elimino base '{args.server}' e continuo su clone '{chosen_clone.name}'")
-
-                        # Cancella la base via deploy script (coerente con tua toolchain)
                         cmd = ["~/deploy_secure_vm.py","--cleanup", args.server,"--wipe-snaps","--yes"]
                         subprocess.run(" ".join(cmd), shell=True, check=True)
-
-                        # Aggiorna target di monitoraggio al clone scelto
                         args.server = chosen_clone.name
                         base = conn.compute.find_server(args.server)
                         fip = _get_server_fip(conn, base)
