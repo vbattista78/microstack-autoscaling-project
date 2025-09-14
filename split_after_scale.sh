@@ -108,7 +108,7 @@ find_existing_clone() {
 wait_clone_ready_setvars() {
   local base="$1" retries=90 sleep_s=2 pref
   pref="$(clone_prefix "$base")"
-  info "Attendo la nascita del clone con prefisso '${pref}' (max ~$((retries*sleep_s/60)) min)..."
+  info "Attendo la nascita del clone con prefisso '${pref}' (max ~$((retries*sleep_s/80)) min)..."
   CLONE_NAME=""; CLONE_FIP=""
   for _ in $(seq 1 "$retries"); do
     while IFS= read -r cname; do
@@ -310,7 +310,7 @@ stop_mode_prompt() {
 usage(){
   cat <<EOF
 Uso:
-  $(basename "$0")             # scegli base, picco >60%, attendi clone pronto, bilancia 50/50
+  $(basename "$0")             # scegli base, picco >80%, attendi clone pronto, bilancia 50/50
   $(basename "$0") --stop      # ARRESTA i carichi su entrambe le VM di ogni coppia base/clone; fallback a prompt se nessuna coppia trovata
 EOF
 }
@@ -342,7 +342,7 @@ if [[ -n "${CNAME_EXIST:-}" && -n "${CFIP_EXIST:-}" ]]; then
   exit 0
 fi
 
-# 3) Innesca picco >60% sulla base
+# 3) Innesca picco >80% sulla base
 info "Nessun clone pronto. Avvio 100% CPU su ${BASE_NAME} per far scattare lo scale-up…"
 start_100 "$BASE_FIP"
 
@@ -372,4 +372,3 @@ ssh "${SSH_OPTS[@]}" "${USER}@${BASE_FIP}"  "printf '[diag base ] yes-procs: '; 
 ssh "${SSH_OPTS[@]}" "${USER}@${CLONE_FIP}" "printf '[diag clone] yes-procs: '; ps w | awk '/(^|[ \\/])yes( |$)/{c++} END{print (c?c:0)}'"
 
 info "Per interrompere i carichi, esegui: $(basename "$0") --stop"
-
