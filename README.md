@@ -26,7 +26,7 @@ microstack.openstack server list
 python3 ./autoscale_watch.py \
   --server VM-test_1 \
   --clone legacy \
-  --high 60 --low 20 \
+  --high 80 --low 20 \
   --min-up 4 --min-down 4 \
   --metric max
 
@@ -128,7 +128,7 @@ python3 ./deploy_secure_vm.py --cleanup VM-test --wipe-snaps --yes
 python3 ./autoscale_watch.py \
   --server VM-test_1 \        # VM to monitor (if omitted: interactive selection in a TTY)
   --clone legacy \            # kept for compatibility; the deployer decides the actual name
-  --high 60 --low 20 \        # thresholds: high to create, low to hand over
+  --high 80 --low 20 \        # thresholds: high to create, low to hand over
   --min-up 4 --min-down 4 \   # consecutive samples required (anti-flap)
   --interval 5 \              # polling interval in seconds
   --metric max \              # cpu | mem | max (use "max" to be conservative)
@@ -168,7 +168,7 @@ python3 ./autoscale_watch.py \
 
 1. `deploy_secure_vm.py --name VM-test` → **`VM-test_1`** ACTIVE with a Floating IP and correct SG in place.  
 2. `autoscale_watch.py --server VM-test_1` → monitoring starts (CPU/MEM).  
-3. `split_after_scale.sh` → sustained load ≥ 60% → controller **creates `<base>_clone_*`**; when load falls ≤ 20% sustained → controller **deletes the baseline** and continues on the **clone**.
+3. `split_after_scale.sh` → sustained load ≥ 80% → controller **creates `<base>_clone_*`**; when load falls ≤ 20% sustained → controller **deletes the baseline** and continues on the **clone**.
 
 ---
 
